@@ -2158,6 +2158,66 @@ class CognitoServiceTest {
         assertEquals("ResourceNotFoundException", ex.getErrorCode());
     }
 
+    @Test
+    void idTokenCarriesTheIdentitiesClaimAsAnArray() {
+        UserPool pool = createPoolAndUser();
+        UserPoolClient client = openClient(service, pool.getId(), "identities-client", false);
+        service.adminLinkProviderForUser(pool.getId(), "alice", "Google", "google-sub-123");
+
+        JsonNode claims = idTokenClaimsOf(pool, client);
+
+        JsonNode identities = claims.path("identities");
+        assertTrue(identities.isArray(),
+                "AWS emits identities as an array, not a stringified one: " + identities);
+        assertEquals(1, identities.size());
+        assertEquals("google-sub-123", identities.get(0).path("userId").asText());
+        assertEquals("Google", identities.get(0).path("providerName").asText());
+        assertFalse(identities.get(0).path("primary").asBoolean());
+
+        // The stored attribute keeps its serialized-array string form; only the token claim is
+        // the array itself.
+        String stored = service.adminGetUser(pool.getId(), "alice").getAttributes().get("identities");
+        JsonNode storedIdentities = assertDoesNotThrow(() -> MAPPER.readTree(stored));
+        assertTrue(storedIdentities.isArray(),
+                "the stored attribute must stay a JSON-array string, not be double-encoded");
+    }
+
+    @Test
+    void idTokenOmitsAMalformedIdentitiesAttribute() {
+        UserPool pool = createPoolAndUser();
+        UserPoolClient client = openClient(service, pool.getId(), "identities-client", false);
+        service.adminUpdateUserAttributes(pool.getId(), "alice", Map.of("identities", "not-json-at-all"));
+
+        JsonNode claims = idTokenClaimsOf(pool, client);
+
+        assertTrue(claims.path("identities").isMissingNode(),
+                "a malformed identities attribute must not surface as a stringified claim");
+    }
+
+    @Test
+    void idTokenOmitsTheIdentitiesClaimWhenTheUserHasNoIdentities() {
+        UserPool pool = createPoolAndUser();
+        UserPoolClient client = openClient(service, pool.getId(), "identities-client", false);
+
+        JsonNode claims = idTokenClaimsOf(pool, client);
+
+        assertTrue(claims.path("identities").isMissingNode());
+    }
+
+    private JsonNode idTokenClaimsOf(UserPool pool, UserPoolClient client) {
+        @SuppressWarnings("unchecked")
+        Map<String, Object> auth = (Map<String, Object>) service.initiateAuth(client.getClientId(),
+                "USER_PASSWORD_AUTH", Map.of("USERNAME", "alice", "PASSWORD", "Perm1234!"))
+                .get("AuthenticationResult");
+        String[] parts = ((String) auth.get("IdToken")).split("\\.");
+        String payload = new String(Base64.getUrlDecoder().decode(parts[1]), StandardCharsets.UTF_8);
+        try {
+            return MAPPER.readTree(payload);
+        } catch (JsonProcessingException e) {
+            throw new AssertionError("id token payload is not valid JSON", e);
+        }
+    }
+
     private JsonNode identitiesOf(UserPool pool, String username) {
         String raw = service.adminGetUser(pool.getId(), username).getAttributes().get("identities");
         assertNotNull(raw, "identities attribute should be set");

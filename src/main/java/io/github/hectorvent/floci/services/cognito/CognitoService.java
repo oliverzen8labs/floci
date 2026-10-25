@@ -2928,7 +2928,7 @@ public class CognitoService implements ResourceProvider {
         return false;
     }
 
-    private ArrayNode readIdentities(CognitoUser user) {
+    private static ArrayNode readIdentities(CognitoUser user) {
         String raw = user.getAttributes().get(IDENTITIES_ATTRIBUTE);
         if (raw != null && !raw.isBlank()) {
             try {
@@ -4848,6 +4848,17 @@ public class CognitoService implements ResourceProvider {
                         claims.put(name, Long.parseLong(value));
                     } catch (NumberFormatException _) {
                         // OIDC requires updated_at to be a JSON number; omit invalid values.
+                    }
+                }
+                case IDENTITIES_ATTRIBUTE -> {
+                    // AWS emits the identities claim as a JSON array of identity objects, while
+                    // the stored attribute (and AdminGetUser) keeps that array serialized as a
+                    // string. Parse it back for the token only: a malformed or non-array
+                    // attribute is dropped with the same warning readIdentities gives, and a
+                    // user with no identities carries no identities claim, as on AWS.
+                    ArrayNode identities = readIdentities(user);
+                    if (!identities.isEmpty()) {
+                        claims.put(name, identities);
                     }
                 }
                 default -> claims.put(name, value);
