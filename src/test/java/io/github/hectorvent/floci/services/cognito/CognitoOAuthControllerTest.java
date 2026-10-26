@@ -46,6 +46,7 @@ import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -663,8 +664,57 @@ class CognitoOAuthControllerTest {
     }
 
     /**
+     * AWS accepts the Basic header that SDKs send for a public client: client_id as the username with
+     * an empty password, which names the client as client_id in the body does.
+     */
+    @Test
+    void tokenRefreshAuthenticatesAPublicClientWithAnEmptySecretInBasic() {
+        refreshesTo(Map.of("AccessToken", "access-token", "ExpiresIn", 3600, "TokenType", "Bearer"));
+
+        Response withoutBodyClientId = controller.token(basicAuthorization(CLIENT_ID, ""), requestContext(null),
+                form("grant_type", "refresh_token", "refresh_token", "refresh-token"));
+        Response withBodyClientId = controller.token(basicAuthorization(CLIENT_ID, ""), requestContext(null),
+                refreshForm());
+
+        assertEquals(200, withoutBodyClientId.getStatus());
+        assertEquals(200, withBodyClientId.getStatus());
+        verify(cognitoService, times(2)).getTokensFromRefreshToken(CLIENT_ID, "refresh-token");
+    }
+
+    /** AWS: a public client has no secret, so a password in Basic is wrong; its body secret is ignored. */
+    @Test
+    void tokenRefreshRefusesAPublicClientWithASecretInBasic() throws Exception {
+        refreshesTo(Map.of("AccessToken", "access-token", "ExpiresIn", 3600, "TokenType", "Bearer"));
+
+        Response response = controller.token(basicAuthorization(CLIENT_ID, "some-secret"), requestContext(null),
+                form("grant_type", "refresh_token", "refresh_token", "refresh-token"));
+
+        assertOAuthBody("secret in Basic", response,
+                "{\"error\":\"invalid_client\",\"error_description\":\"invalid_client_secret\"}");
+        verify(cognitoService, never()).getTokensFromRefreshToken(any(), any());
+
+        Response withBodySecret = controller.token(null, requestContext(null), form("grant_type", "refresh_token",
+                "client_id", CLIENT_ID, "client_secret", "some-secret", "refresh_token", "refresh-token"));
+
+        assertEquals(200, withBodySecret.getStatus());
+    }
+
+    /** AWS: a client with a secret refuses the empty Basic password a public client may send. */
+    @Test
+    void tokenRefreshRefusesAnEmptySecretForAConfidentialClient() throws Exception {
+        client.setClientSecret("client-secret");
+
+        Response response = controller.token(basicAuthorization(CLIENT_ID, ""), requestContext(null),
+                form("grant_type", "refresh_token", "refresh_token", "refresh-token"));
+
+        assertOAuthBody("empty secret", response,
+                "{\"error\":\"invalid_client\",\"error_description\":\"invalid_client_secret\"}");
+        verify(cognitoService, never()).getTokensFromRefreshToken(any(), any());
+    }
+
+    /**
      * AWS answers 400 invalid_client, without a description, for a client it cannot identify, and
-     * checks the client before the refresh token. A public client has no secret to send in Basic.
+     * checks the client before the refresh token.
      */
     @Test
     void tokenRefreshRefusesAClientItCannotIdentifyBeforeLookingAtTheToken() throws Exception {
@@ -675,7 +725,7 @@ class CognitoOAuthControllerTest {
                 form("grant_type", "refresh_token", "client_id", "missing-client", "refresh_token", "not-a-token")));
         responses.put("no client", controller.token(null, requestContext(null),
                 form("grant_type", "refresh_token", "refresh_token", "refresh-token")));
-        responses.put("public client in Basic", controller.token(basicAuthorization(CLIENT_ID, ""),
+        responses.put("unknown client in Basic", controller.token(basicAuthorization("missing-client", ""),
                 requestContext(null), form("grant_type", "refresh_token", "refresh_token", "refresh-token")));
         responses.put("malformed Basic", controller.token("Basic not-base64!", requestContext(null),
                 refreshForm()));

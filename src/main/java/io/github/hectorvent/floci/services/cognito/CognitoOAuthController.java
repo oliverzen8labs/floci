@@ -630,8 +630,9 @@ public class CognitoOAuthController {
     /**
      * Renews a session through the refresh shared with {@code GetTokensFromRefreshToken}, answering as
      * AWS does. The client is checked before the refresh token: a Basic header names it whatever the
-     * body says, and authenticates it with the header's secret. A public client has none, so a secret
-     * there is wrong and an empty one names no client; its body {@code client_secret} is ignored.
+     * body says, and authenticates it with the header's secret. A public client has no secret, so its
+     * Basic header may name it with an empty password, as the AWS SDKs send for {@code client_id} in
+     * the body, while a password there is wrong; its body {@code client_secret} is ignored.
      * On a custom domain it must be a client of the domain's pool. Unlike the API's refresh, AWS does
      * not require {@code ALLOW_REFRESH_TOKEN_AUTH} or any OAuth setting here. A refreshed access token
      * keeps the scopes of the original grant, so no {@code scope} is read, and, as refresh token
@@ -648,10 +649,15 @@ public class CognitoOAuthController {
         String clientId = basic != null ? basic.clientId() : trimToNull(formParams.getFirst("client_id"));
         String clientSecret = basic != null ? basic.clientSecret() : trimToNull(formParams.getFirst("client_secret"));
         UserPoolClient client = clientId == null ? null : clientOfDomain(clientId, domainPoolId);
-        if (client == null || (basic != null && !hasSecret(client) && clientSecret == null)) {
+        if (client == null) {
             return oauthError("invalid_client");
         }
-        if (!clientSecretMatches(client, clientSecret) || (basic != null && !hasSecret(client))) {
+        // A public client has no secret: an empty Basic password only names the client, as client_id
+        // in the body does, while a password there claims a secret it does not have.
+        if (basic != null && !hasSecret(client) && clientSecret != null) {
+            return oauthError("invalid_client", "invalid_client_secret");
+        }
+        if (!clientSecretMatches(client, clientSecret)) {
             return oauthError("invalid_client", "invalid_client_secret");
         }
         String refreshToken = trimToNull(formParams.getFirst("refresh_token"));

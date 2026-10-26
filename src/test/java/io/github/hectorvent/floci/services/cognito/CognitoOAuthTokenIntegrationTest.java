@@ -765,10 +765,28 @@ class CognitoOAuthTokenIntegrationTest {
         assertBody(refreshGrant(null, "not a client id!", "not-a-refresh-token"), 400, expected);
         assertBody(given().formParam("grant_type", "refresh_token").formParam("refresh_token", user.refreshToken())
                 .when().post("/cognito-idp/oauth2/token"), 400, expected);
-        assertBody(given().header("Authorization", "Basic " + Base64.getEncoder()
-                        .encodeToString((user.clientId() + ":").getBytes(StandardCharsets.UTF_8)))
-                .formParam("grant_type", "refresh_token").formParam("refresh_token", user.refreshToken())
-                .when().post("/cognito-idp/oauth2/token"), 400, expected);
+        assertBody(refreshWithBasic(basic("unknown-client", ""), null, user.refreshToken()), 400, expected);
+    }
+
+    /**
+     * AWS accepts the Basic header that SDKs send for a public client: client_id as the username with
+     * an empty password, which names the client as client_id in the body does.
+     */
+    @Test
+    @Order(38)
+    void refreshGrantAuthenticatesAPublicClientByBasicWithAnEmptySecret() throws Exception {
+        SignedInUser user = signIn(poolId);
+
+        Response withoutBodyClientId = refreshWithBasic(basic(user.clientId(), ""), null, user.refreshToken());
+        withoutBodyClientId.then()
+                .statusCode(200)
+                .body("token_type", equalTo("Bearer"))
+                .body("expires_in", equalTo(3600));
+        assertEquals(user.clientId(),
+                decodeJwtPayload(withoutBodyClientId.path("access_token")).path("client_id").asText());
+        getUser(withoutBodyClientId.path("access_token")).then().statusCode(200);
+
+        refreshWithBasic(basic(user.clientId(), ""), user.clientId(), user.refreshToken()).then().statusCode(200);
     }
 
     /**
@@ -776,7 +794,7 @@ class CognitoOAuthTokenIntegrationTest {
      * client whatever the body's client_id says. A missing or wrong secret is the same 400.
      */
     @Test
-    @Order(38)
+    @Order(39)
     void refreshGrantAuthenticatesAConfidentialClient() throws Exception {
         JsonNode created = cognitoJson("CreateUserPoolClient", """
                 {"UserPoolId": "%s", "ClientName": "confidential-refresh-client", "GenerateSecret": true,
@@ -791,6 +809,7 @@ class CognitoOAuthTokenIntegrationTest {
         assertBody(refreshGrant(null, confidentialId, refreshToken), 400, invalidSecret);
         assertBody(refreshWithBodySecret(confidentialId, "not-the-secret", refreshToken), 400, invalidSecret);
         assertBody(refreshWithBasic(basic(confidentialId, "not-the-secret"), null, refreshToken), 400, invalidSecret);
+        assertBody(refreshWithBasic(basic(confidentialId, ""), null, refreshToken), 400, invalidSecret);
         refreshWithBodySecret(confidentialId, secret, refreshToken).then().statusCode(200);
         refreshWithBasic(basic(confidentialId, secret), null, refreshToken).then().statusCode(200);
         refreshWithBasic(basic(confidentialId, secret), confidentialId, refreshToken).then().statusCode(200);
@@ -804,7 +823,7 @@ class CognitoOAuthTokenIntegrationTest {
      * any OAuth settings, unlike the refresh operations of the API.
      */
     @Test
-    @Order(39)
+    @Order(40)
     void refreshGrantDoesNotRequireTheRefreshFlowOrAnOAuthClient() throws Exception {
         String passwordOnlyClient = cognitoJson("CreateUserPoolClient", """
                 {"UserPoolId": "%s", "ClientName": "password-only-client",
@@ -830,21 +849,19 @@ class CognitoOAuthTokenIntegrationTest {
     }
 
     /**
-     * AWS: a public client has no secret, so in a Basic header a secret is wrong and an empty one, or
-     * none, names no client. A client_secret in the body of a public client is ignored.
+     * AWS: a public client has no secret, so a password in Basic is wrong, and a header without the
+     * colon of user:password names no client; its body client_secret is ignored.
      */
     @Test
-    @Order(40)
+    @Order(41)
     void refreshGrantRefusesBasicCredentialsOfAPublicClient() throws Exception {
         SignedInUser user = signIn(poolId);
-        String bareInvalidClient = "{\"error\":\"invalid_client\"}";
 
         assertBody(refreshWithBasic(basic(user.clientId(), "wrongsecret"), null, user.refreshToken()), 400,
                 "{\"error\":\"invalid_client\",\"error_description\":\"invalid_client_secret\"}");
-        assertBody(refreshWithBasic(basic(user.clientId(), ""), user.clientId(), user.refreshToken()), 400,
-                bareInvalidClient);
         assertBody(refreshWithBasic("Basic " + Base64.getEncoder().encodeToString(
-                user.clientId().getBytes(StandardCharsets.UTF_8)), null, user.refreshToken()), 400, bareInvalidClient);
+                user.clientId().getBytes(StandardCharsets.UTF_8)), null, user.refreshToken()),
+                400, "{\"error\":\"invalid_client\"}");
         refreshWithBodySecret(user.clientId(), "wrongsecret", user.refreshToken()).then().statusCode(200);
     }
 
